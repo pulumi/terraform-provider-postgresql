@@ -1,4 +1,4 @@
-module github.com/terraform-providers/terraform-provider-postgresql
+module github.com/cyrilgdn/terraform-provider-postgresql
 
 go 1.14
 
