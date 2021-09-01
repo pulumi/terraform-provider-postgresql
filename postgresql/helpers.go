@@ -235,12 +235,14 @@ func sliceContainsStr(haystack []string, needle string) bool {
 // allowedPrivileges is the list of privileges allowed per object types in Postgres.
 // see: https://www.postgresql.org/docs/current/sql-grant.html
 var allowedPrivileges = map[string][]string{
-	"database": []string{"ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"},
-	"table":    []string{"ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"},
-	"sequence": []string{"ALL", "USAGE", "SELECT", "UPDATE"},
-	"schema":   []string{"ALL", "CREATE", "USAGE"},
-	"function": []string{"ALL", "EXECUTE"},
-	"type":     []string{"ALL", "USAGE"},
+	"database":             []string{"ALL", "CREATE", "CONNECT", "TEMPORARY", "TEMP"},
+	"table":                []string{"ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"},
+	"sequence":             []string{"ALL", "USAGE", "SELECT", "UPDATE"},
+	"schema":               []string{"ALL", "CREATE", "USAGE"},
+	"function":             []string{"ALL", "EXECUTE"},
+	"type":                 []string{"ALL", "USAGE"},
+	"foreign_data_wrapper": []string{"ALL", "USAGE"},
+	"foreign_server":       []string{"ALL", "USAGE"},
 }
 
 // validatePrivileges checks that privileges to apply are allowed for this object type.
@@ -267,6 +269,17 @@ func pgArrayToSet(arr pq.ByteaArray) *schema.Set {
 		s[i] = string(v)
 	}
 	return schema.NewSet(schema.HashString, s)
+}
+
+func setToPgIdentList(schema string, idents *schema.Set) string {
+	quotedIdents := make([]string, idents.Len())
+	for i, ident := range idents.List() {
+		quotedIdents[i] = fmt.Sprintf(
+			"%s.%s",
+			pq.QuoteIdentifier(schema), pq.QuoteIdentifier(ident.(string)),
+		)
+	}
+	return strings.Join(quotedIdents, ",")
 }
 
 // startTransaction starts a new DB transaction on the specified database.
@@ -444,6 +457,10 @@ func getRoleOID(db QueryAble, role string) (int, error) {
 
 // Lock a role and all his members to avoid concurrent updates on some resources
 func pgLockRole(txn *sql.Tx, role string) error {
+	// Disable statement timeout for this connection otherwise the lock could fail
+	if _, err := txn.Exec("SET statement_timeout = 0"); err != nil {
+		return fmt.Errorf("could not disable statement_timeout: %w", err)
+	}
 	if _, err := txn.Exec("SELECT pg_advisory_xact_lock(oid::bigint) FROM pg_roles WHERE rolname = $1", role); err != nil {
 		return fmt.Errorf("could not get advisory lock for role %s: %w", role, err)
 	}

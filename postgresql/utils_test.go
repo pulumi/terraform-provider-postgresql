@@ -69,6 +69,13 @@ func skipIfNotAcc(t *testing.T) {
 	}
 }
 
+// Skip tests on RDS like environments
+func skipIfNotSuperuser(t *testing.T) {
+	if os.Getenv("PGSUPERUSER") == "false" {
+		t.Skip("Acceptance tests skipped due to lack of real superuser privileges")
+	}
+}
+
 // dbExecute is a test helper to create a pool, execute one query then close the pool
 func dbExecute(t *testing.T, dsn, query string, args ...interface{}) {
 	db, err := sql.Open("postgres", dsn)
@@ -177,11 +184,10 @@ func createTestTables(t *testing.T, dbSuffix string, tables []string, owner stri
 	// In this case we need to drop table after each test.
 	return func() {
 		db, err := sql.Open("postgres", config.connStr(dbName))
-		defer db.Close()
-
 		if err != nil {
 			t.Fatalf("could not open connection pool for db %s: %v", dbName, err)
 		}
+		defer db.Close()
 
 		if owner != "" && !config.Superuser {
 			if _, err := db.Exec(fmt.Sprintf("GRANT %s TO CURRENT_USER", owner)); err != nil {
