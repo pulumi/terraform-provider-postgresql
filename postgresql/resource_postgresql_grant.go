@@ -6,8 +6,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 
 	// Use Postgres as SQL driver
 	"github.com/lib/pq"
@@ -16,6 +16,8 @@ import (
 var allowedObjectTypes = []string{
 	"database",
 	"function",
+	"procedure",
+	"routine",
 	"schema",
 	"sequence",
 	"table",
@@ -28,6 +30,7 @@ var objectTypes = map[string]string{
 	"sequence": "S",
 	"function": "f",
 	"type":     "T",
+	"schema":   "n",
 }
 
 func resourcePostgreSQLGrant() *schema.Resource {
@@ -72,7 +75,7 @@ func resourcePostgreSQLGrant() *schema.Resource {
 				Set:         schema.HashString,
 				Description: "The specific objects to grant privileges on for this role (empty means all objects of the requested type)",
 			},
-			"privileges": &schema.Schema{
+			"privileges": {
 				Type:        schema.TypeSet,
 				Required:    true,
 				Elem:        &schema.Schema{Type: schema.TypeString},
@@ -91,11 +94,8 @@ func resourcePostgreSQLGrant() *schema.Resource {
 }
 
 func resourcePostgreSQLGrantRead(db *DBConnection, d *schema.ResourceData) error {
-	if !db.featureSupported(featurePrivileges) {
-		return fmt.Errorf(
-			"postgresql_grant resource is not supported for this Postgres version (%s)",
-			db.version,
-		)
+	if err := validateFeatureSupport(db, d); err != nil {
+		return fmt.Errorf("feature is not supported: %v", err)
 	}
 
 	exists, err := checkRoleDBSchemaExists(db.client, d)
@@ -118,11 +118,8 @@ func resourcePostgreSQLGrantRead(db *DBConnection, d *schema.ResourceData) error
 }
 
 func resourcePostgreSQLGrantCreate(db *DBConnection, d *schema.ResourceData) error {
-	if !db.featureSupported(featurePrivileges) {
-		return fmt.Errorf(
-			"postgresql_grant resource is not supported for this Postgres version (%s)",
-			db.version,
-		)
+	if err := validateFeatureSupport(db, d); err != nil {
+		return fmt.Errorf("feature is not supported: %v", err)
 	}
 
 	// Validate parameters.
@@ -147,6 +144,11 @@ func resourcePostgreSQLGrantCreate(db *DBConnection, d *schema.ResourceData) err
 		return err
 	}
 	defer deferredRollback(txn)
+
+	role := d.Get("role").(string)
+	if err := pgLockRole(txn, role); err != nil {
+		return err
+	}
 
 	owners, err := getRolesToGrant(txn, d)
 	if err != nil {
@@ -183,11 +185,8 @@ func resourcePostgreSQLGrantCreate(db *DBConnection, d *schema.ResourceData) err
 }
 
 func resourcePostgreSQLGrantDelete(db *DBConnection, d *schema.ResourceData) error {
-	if !db.featureSupported(featurePrivileges) {
-		return fmt.Errorf(
-			"postgresql_grant resource is not supported for this Postgres version (%s)",
-			db.version,
-		)
+	if err := validateFeatureSupport(db, d); err != nil {
+		return fmt.Errorf("feature is not supported: %v", err)
 	}
 
 	txn, err := startTransaction(db.client, d.Get("database").(string))
@@ -195,6 +194,11 @@ func resourcePostgreSQLGrantDelete(db *DBConnection, d *schema.ResourceData) err
 		return err
 	}
 	defer deferredRollback(txn)
+
+	role := d.Get("role").(string)
+	if err := pgLockRole(txn, role); err != nil {
+		return err
+	}
 
 	owners, err := getRolesToGrant(txn, d)
 	if err != nil {
@@ -318,7 +322,7 @@ func readRolePrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 	case "foreign_server":
 		return readForeignServerRolePrivileges(txn, d, roleOID)
 
-	case "function":
+	case "function", "procedure", "routine":
 		query = `
 SELECT pg_proc.proname, array_remove(array_agg(privilege_type), NULL)
 FROM pg_proc
@@ -430,7 +434,7 @@ func createGrantQuery(d *schema.ResourceData, privileges []string) string {
 			pq.QuoteIdentifier(srvName.(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	case "TABLE", "SEQUENCE", "FUNCTION":
+	case "TABLE", "SEQUENCE", "FUNCTION", "PROCEDURE", "ROUTINE":
 		objects := d.Get("objects").(*schema.Set)
 		if objects.Len() > 0 {
 			query = fmt.Sprintf(
@@ -488,7 +492,7 @@ func createRevokeQuery(d *schema.ResourceData) string {
 			pq.QuoteIdentifier(srvName.(string)),
 			pq.QuoteIdentifier(d.Get("role").(string)),
 		)
-	case "TABLE", "SEQUENCE", "FUNCTION":
+	case "TABLE", "SEQUENCE", "FUNCTION", "PROCEDURE", "ROUTINE":
 		objects := d.Get("objects").(*schema.Set)
 		if objects.Len() > 0 {
 			query = fmt.Sprintf(
@@ -636,4 +640,26 @@ func getRolesToGrant(txn *sql.Tx, d *schema.ResourceData) ([]string, error) {
 	}
 
 	return owners, nil
+}
+
+func validateFeatureSupport(db *DBConnection, d *schema.ResourceData) error {
+	if !db.featureSupported(featurePrivileges) {
+		return fmt.Errorf(
+			"postgresql_grant resource is not supported for this Postgres version (%s)",
+			db.version,
+		)
+	}
+	if d.Get("object_type") == "procedure" && !db.featureSupported(featureProcedure) {
+		return fmt.Errorf(
+			"object type PROCEDURE is not supported for this Postgres version (%s)",
+			db.version,
+		)
+	}
+	if d.Get("object_type") == "routine" && !db.featureSupported(featureRoutine) {
+		return fmt.Errorf(
+			"object type ROUTINE is not supported for this Postgres version (%s)",
+			db.version,
+		)
+	}
+	return nil
 }
